@@ -2,13 +2,19 @@
 # agent-tell.sh - inter-agent message bus over the cmux socket API.
 #
 # Usage: agent-tell.sh <target> <message>
+#        agent-tell.sh <target> @<file>     (send file as a handoff doc)
 #   <target>: peer name from .agent_bus/peers, a surface title, a surface
 #             ref (surface:N), or a surface UUID.
 #
 # The target is validated against `cmux tree` before sending (bad targets
 # exit non-zero instead of falling back to the focused pane). The message
-# is logged to .agent_bus/<target>.log and injected via `cmux send` with a
-# trailing Enter so the prompt submits.
+# is logged to .agent_bus/<target>.log, injected via `cmux send`, then
+# submitted with a discrete `cmux send-key enter` event.
+#
+# Heavy payloads are automatic: a message over 500 chars or containing a
+# real newline is written to .agent_bus/handoff_<timestamp>.md and only a
+# short pointer is sent. `@<file>` copies the file into .agent_bus/ the
+# same way.
 
 set -u
 
@@ -55,9 +61,36 @@ esac
 printf '%s\n' "$TREE" | grep 'surface surface:' | grep -qw "$REF" \
   || die "target '$TARGET' resolved to '$REF', which is not a live surface - stale .agent_bus/peers? run: cmux tree"
 
+# Automatic handoff: oversized/multiline messages and @<file> payloads are
+# persisted under .agent_bus/ and only a pointer reaches the peer's prompt.
+# Pointers are absolute paths - the peer's CWD may differ from ours.
+NL='
+'
+case $MSG in
+  @*)
+    SRC=${MSG#@}
+    [ -f "$SRC" ] || die "handoff file not found: $SRC"
+    SRC=$(CDPATH= cd -- "$(dirname -- "$SRC")" && pwd)/$(basename -- "$SRC")
+    case $SRC in
+      "$BUS_DIR"/*) HANDOFF=$SRC ;;
+      *) HANDOFF="$BUS_DIR/handoff_$(basename -- "$SRC")"; cp -- "$SRC" "$HANDOFF" || die "cannot copy $SRC" ;;
+    esac
+    MSG="handoff: see $HANDOFF"
+    ;;
+  *)
+    if [ ${#MSG} -gt 500 ] || [ "${MSG%"$NL"*}" != "$MSG" ]; then
+      HANDOFF="$BUS_DIR/handoff_$(date -u '+%Y%m%dT%H%M%SZ').md"
+      printf '%s\n' "$MSG" > "$HANDOFF" || die "cannot write $HANDOFF"
+      MSG="handoff: see $HANDOFF"
+    fi
+    ;;
+esac
+
 LOG_TARGET=$(printf '%s' "$TARGET" | tr '/ ' '__')
 printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${CMUX_SURFACE_ID:-unknown}" "$REF" "$MSG" \
   >> "$BUS_DIR/$LOG_TARGET.log" || die "cannot write $BUS_DIR/$LOG_TARGET.log"
 
-cmux send --surface "$REF" -- "$MSG\n" || die "cmux send to $REF failed"
+# Text and Enter as two discrete operations: send-key is the reliable submit.
+cmux send --surface "$REF" -- "$MSG" || die "cmux send to $REF failed"
+cmux send-key --surface "$REF" enter || die "cmux send-key enter to $REF failed"
 printf 'sent to %s (%s); logged in %s\n' "$TARGET" "$REF" "$BUS_DIR/$LOG_TARGET.log"
