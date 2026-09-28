@@ -108,13 +108,16 @@ def test_register_without_jq_uses_sed_fallback(bus, tmp_path):
     nojq = tmp_path / "nojq"
     nojq.mkdir()
     for tool in ("sh", "awk", "sed", "grep", "tr", "head", "cat", "mkdir", "rmdir",
-                 "mv", "sort", "sleep", "basename", "dirname", "printf"):
+                 "mv", "sort", "sleep", "basename", "dirname", "printf",
+                 "rm", "date", "stat"):
         src = shutil.which(tool)
         if src:
             os.symlink(src, nojq / tool)
     bus("devin", caller="surface:2",
         env={"PATH": f"{tmp_path / 'bin'}{os.pathsep}{nojq}"}, check=True)
     assert entries(bus.peers) == {"devin": "surface:2"}
+    # unlock must actually run: peers.lock (incl. its pid file) is gone
+    assert not (bus.root / ".agent_bus" / "peers.lock").exists()
 
 
 def test_register_fails_outside_cmux(bus):
@@ -238,3 +241,30 @@ def test_concurrent_registrations_do_not_lose_entries(bus):
         assert proc.returncode == 0, proc.stderr
     assert entries(bus.peers) == dict(zip(names, live.split()))
     assert not (bus.peers.parent / "peers.lock").exists()
+
+
+def test_lock_from_dead_process_is_reclaimed(bus):
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    lockdir = bus.peers.parent / "peers.lock"
+    lockdir.mkdir(parents=True)
+    (lockdir / "pid").write_text(str(dead.pid))
+    bus("devin", caller="surface:1", check=True)
+    assert entries(bus.peers) == {"devin": "surface:1"}
+    assert not lockdir.exists()
+
+
+def test_lock_from_live_process_is_not_stolen(bus):
+    sleeper = subprocess.Popen(["sleep", "60"])
+    lockdir = bus.peers.parent / "peers.lock"
+    lockdir.mkdir(parents=True)
+    (lockdir / "pid").write_text(str(sleeper.pid))
+    try:
+        proc = bus("devin", caller="surface:1",
+                   env={"BUS_LOCK_WAIT_TIMEOUT": "2"})
+        assert proc.returncode == 1
+        assert "held by live pid" in proc.stderr
+        assert lockdir.exists()
+    finally:
+        sleeper.kill()
+        sleeper.wait()

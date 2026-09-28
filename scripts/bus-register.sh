@@ -27,6 +27,7 @@ BUS_DIR="$ROOT/.agent_bus"
 PEERS="$BUS_DIR/peers"
 LOCK="$PEERS.lock"
 LOCK_TIMEOUT=${BUS_LOCK_TIMEOUT:-10}
+LOCK_WAIT=${BUS_LOCK_WAIT_TIMEOUT:-60}
 mkdir -p "$BUS_DIR"
 
 MODE=register
@@ -55,13 +56,23 @@ esac
 command -v cmux >/dev/null 2>&1 || die "cmux CLI not found in PATH"
 
 # mkdir is atomic on every POSIX filesystem, so it doubles as a portable
-# mutex. A lock whose DIRECTORY is older than LOCK_TIMEOUT is assumed stale
-# (crashed writer) and broken; a fresh lock is never stolen no matter how
-# long we wait. The lock dir holds a pid file so a process only releases a
-# lock it actually owns.
+# mutex. A lock is stale only when its owner pid is dead or - for a lock
+# whose pid file was never written (crash between mkdir and write) - when
+# the directory is older than LOCK_TIMEOUT. A live writer keeps its lock no
+# matter how long it runs; waiters give up after LOCK_WAIT seconds and
+# report the holder.
 lock_stale() {
-  mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)
-  [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -ge "$LOCK_TIMEOUT" ]
+  owner=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "$owner" ]; then
+    ! kill -0 "$owner" 2>/dev/null
+    return
+  fi
+  # `stat -c` is GNU, `-f` is BSD - `-f` also EXISTS on GNU (filesystem
+  # status), so try GNU first and numeric-validate; a BSD-only `-c` failure
+  # falls through to `-f`.
+  mtime=$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)
+  case $mtime in ''|*[!0-9]*) return 1 ;; esac
+  [ $(( $(date +%s) - mtime )) -ge "$LOCK_TIMEOUT" ]
 }
 
 unlock() {
@@ -72,12 +83,15 @@ unlock() {
 }
 
 lock() {
+  waited=0
   until mkdir "$LOCK" 2>/dev/null; do
     if lock_stale; then
       rm -f "$LOCK/pid" 2>/dev/null
       rmdir "$LOCK" 2>/dev/null
       continue
     fi
+    waited=$((waited + 1))
+    [ "$waited" -lt "$LOCK_WAIT" ] || die "peers lock held by live pid $(cat "$LOCK/pid" 2>/dev/null || echo unknown) for over ${LOCK_WAIT}s"
     sleep 1
   done
   printf '%s\n' "$$" > "$LOCK/pid"
@@ -110,10 +124,15 @@ caller_ref() {
 }
 
 # Rewrite the peers file keeping comments, blank lines and entries whose ref
-# is still live. Malformed non-comment lines (no ref) are dropped.
+# is still live. Malformed non-comment lines (no ref) are dropped. The live
+# set is re-read here - inside the lock - so a peer that appeared while we
+# waited is not pruned as dead; if cmux is briefly unreachable we skip
+# pruning rather than wipe the file.
 prune_peers() {
+  live_now=$(live_refs) || live_now=
+  [ -n "$live_now" ] || { echo "bus-register: live tree unreachable - skipping prune" >&2; return 0; }
   [ -f "$PEERS" ] || printf '# name -> live cmux surface ref (auto-maintained by bus-register.sh)\n' > "$PEERS"
-  printf '%s\n' "$LIVE" | awk '
+  printf '%s\n' "$live_now" | awk '
     NR == FNR { live[$0] = 1; next }
     /^[[:space:]]*(#|$)/ { print; next }
     NF < 2 { next }
