@@ -76,9 +76,21 @@ mtime_of() {
   printf '%s\n' "$m"
 }
 
-# Epoch seconds when pid $1's process started, for systems without /proc:
-# elapsed time from `ps etime` ([[dd-]hh:]mm:ss) subtracted from now.
+# Epoch seconds when pid $1's process started. On Linux this is field 22
+# of /proc/<pid>/stat (jiffies since boot) plus btime - NOT the /proc dir
+# mtime, which updates as the process forks and would always look newer
+# than the lock. comm may contain spaces or parens, so strip through the
+# last ')'. Elsewhere fall back to `ps etime` ([[dd-]hh:]mm:ss).
 proc_start() {
+  if [ -r "/proc/$1/stat" ] && [ -r /proc/stat ]; then
+    btime=$(awk '/^btime / { print $2; exit }' /proc/stat)
+    start=$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{ print $20 }')
+    hz=$(getconf CLK_TCK 2>/dev/null)
+    case $btime$start$hz in ''|*[!0-9]*) ;; *)
+      printf '%s\n' $(( btime + start / hz ))
+      return ;;
+    esac
+  fi
   elapsed=$(ps -o etime= -p "$1" 2>/dev/null | awk '{
     sub(/\.[0-9]+$/, ""); d = 0; hms = $0
     if (index(hms, "-")) { split(hms, a, "-"); d = a[1]; hms = a[2] }
@@ -90,14 +102,10 @@ proc_start() {
 }
 
 # Owner pid $1 is alive but may be recycled: the process that created the
-# lock must have started before the lock file existed. On Linux this is a
-# nanosecond -nt test against /proc/<pid>; elsewhere compare ps-derived
-# start to the file mtime with a 1s margin for whole-second flooring.
+# lock must have started before the lock file existed. A 1s margin absorbs
+# timestamp-granularity differences between jiffies, stat and wall clock;
+# anything ambiguous answers "not stale".
 lock_owner_recycled() {
-  if [ -d "/proc/$1" ]; then
-    [ "/proc/$1" -nt "$2" ]
-    return
-  fi
   pstart=$(proc_start "$1")
   mtime=$(mtime_of "$2")
   case $pstart in ''|*[!0-9]*) return 1 ;; esac
