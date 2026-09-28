@@ -73,26 +73,34 @@ mtime_of() {
   printf '%s\n' "$m"
 }
 
-# Seconds since a pid's process started, parsed from `ps etime`
-# ([[dd-]hh:]mm:ss - etimes is unavailable on BSD ps).
-proc_age() {
-  ps -o etime= -p "$1" 2>/dev/null | awk '{
+# Epoch seconds when pid $1's process started: /proc/<pid> dir mtime on
+# Linux (procfs is always mounted - no procps needed); elsewhere the
+# elapsed time from `ps etime` ([[dd-]hh:]mm:ss - etimes is unavailable on
+# BSD ps) subtracted from now.
+proc_start() {
+  if [ -d "/proc/$1" ]; then
+    mtime_of "/proc/$1"
+    return
+  fi
+  elapsed=$(ps -o etime= -p "$1" 2>/dev/null | awk '{
     sub(/\.[0-9]+$/, ""); d = 0; hms = $0
     if (index(hms, "-")) { split(hms, a, "-"); d = a[1]; hms = a[2] }
     n = split(hms, t, ":"); s = 0
     for (i = 1; i <= n; i++) s = s * 60 + t[i]
-    print d * 86400 + s }'
+    print d * 86400 + s }')
+  case $elapsed in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' $(( $(date +%s) - elapsed ))
 }
 
 lock_dir_stale() {
   owner=$(cat "$1/pid" 2>/dev/null)
   if [ -n "$owner" ]; then
     kill -0 "$owner" 2>/dev/null || return 0
-    elapsed=$(proc_age "$owner")
+    pstart=$(proc_start "$owner")
     mtime=$(mtime_of "$1")
-    case $elapsed in ''|*[!0-9]*) return 1 ;; esac
+    case $pstart in ''|*[!0-9]*) return 1 ;; esac
     case $mtime in ''|*[!0-9]*) return 1 ;; esac
-    [ $(( $(date +%s) - elapsed )) -gt "$mtime" ]
+    [ "$pstart" -gt "$mtime" ]
     return
   fi
   mtime=$(mtime_of "$1") || return 1
