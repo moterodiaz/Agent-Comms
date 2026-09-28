@@ -34,7 +34,7 @@ PEERS="$BUS_DIR/peers"
 mkdir -p "$BUS_DIR"
 
 command -v cmux >/dev/null 2>&1 || die "cmux CLI not found in PATH"
-TREE=$(cmux --id-format both tree 2>/dev/null) || die "cannot reach cmux socket (is the app running?)"
+TREE=$(cmux --id-format both tree --all 2>/dev/null) || die "cannot reach cmux socket (is the app running?)"
 
 ref_for_uuid() {
   printf '%s\n' "$TREE" | grep -i "surface surface:.*$1" | grep -o 'surface:[0-9][0-9]*' | head -n 1
