@@ -55,18 +55,34 @@ esac
 command -v cmux >/dev/null 2>&1 || die "cmux CLI not found in PATH"
 
 # mkdir is atomic on every POSIX filesystem, so it doubles as a portable
-# mutex. A stale lock (crashed writer) is broken after LOCK_TIMEOUT seconds.
+# mutex. A lock whose DIRECTORY is older than LOCK_TIMEOUT is assumed stale
+# (crashed writer) and broken; a fresh lock is never stolen no matter how
+# long we wait. The lock dir holds a pid file so a process only releases a
+# lock it actually owns.
+lock_stale() {
+  mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)
+  [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -ge "$LOCK_TIMEOUT" ]
+}
+
+unlock() {
+  owner=$(cat "$LOCK/pid" 2>/dev/null)
+  [ "$owner" = "$$" ] || return 0
+  rm -f "$LOCK/pid" 2>/dev/null
+  rmdir "$LOCK" 2>/dev/null
+}
+
 lock() {
-  waited=0
   until mkdir "$LOCK" 2>/dev/null; do
-    if [ "$waited" -ge "$LOCK_TIMEOUT" ]; then
-      rmdir "$LOCK" 2>/dev/null && continue
-      die "timed out waiting for $LOCK"
+    if lock_stale; then
+      rm -f "$LOCK/pid" 2>/dev/null
+      rmdir "$LOCK" 2>/dev/null
+      continue
     fi
     sleep 1
-    waited=$((waited + 1))
   done
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM HUP
+  printf '%s\n' "$$" > "$LOCK/pid"
+  trap unlock EXIT
+  trap 'exit 1' INT TERM HUP
 }
 
 # Live surface refs across every workspace and window - agents on the bus do
@@ -103,8 +119,8 @@ prune_peers() {
     NF < 2 { next }
     $2 ~ /^surface:/ && !($2 in live) { next }
     { print }
-  ' - "$PEERS" > "$PEERS.tmp" || die "cannot write $PEERS.tmp"
-  mv "$PEERS.tmp" "$PEERS" || die "cannot update $PEERS"
+  ' - "$PEERS" > "$TMP" || die "cannot write $TMP"
+  mv "$TMP" "$PEERS" || die "cannot update $PEERS"
 }
 
 LIVE=$(live_refs)
@@ -117,6 +133,7 @@ if [ "$MODE" = register ]; then
 fi
 
 lock
+TMP="$PEERS.tmp.$$"
 prune_peers
 
 case $MODE in
@@ -132,8 +149,8 @@ if [ -n "$CURRENT" ] && [ "$CURRENT" != "$REF" ] && [ $FORCE -eq 0 ]; then
   die "name '$NAME' is already registered to live surface $CURRENT (you are $REF) - pick another name or pass --force"
 fi
 
-awk -v n="$NAME" '$1 != n' "$PEERS" > "$PEERS.tmp" || die "cannot write $PEERS.tmp"
-printf '%s %s\n' "$NAME" "$REF" >> "$PEERS.tmp"
-mv "$PEERS.tmp" "$PEERS" || die "cannot update $PEERS"
+awk -v n="$NAME" '$1 != n' "$PEERS" > "$TMP" || die "cannot write $TMP"
+printf '%s %s\n' "$NAME" "$REF" >> "$TMP"
+mv "$TMP" "$PEERS" || die "cannot update $PEERS"
 
 printf 'registered %s as %s; logged in %s\n' "$NAME" "$REF" "$PEERS"
