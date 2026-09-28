@@ -55,13 +55,16 @@ esac
 
 command -v cmux >/dev/null 2>&1 || die "cmux CLI not found in PATH"
 
-# mkdir is atomic on every POSIX filesystem, so it doubles as a portable
-# mutex. A lock is stale only when its owner pid is dead, when a live pid
-# postdates the lock dir (pid recycled - the real creator must have started
-# before the dir existed), or - for a lock whose pid file was never written
-# (crash between mkdir and write) - when the dir is older than LOCK_TIMEOUT.
-# A live writer keeps its lock no matter how long it runs; waiters give up
-# after LOCK_WAIT seconds and report the holder.
+# The peers lock is created by a `set -C` (O_EXCL) write: the file and its
+# pid content appear in one atomic operation and the claim fails on ANY
+# existing target - file or directory - so no window exists where a lock
+# lacks a readable owner. A lock is stale only when its owner pid is dead,
+# when a
+# live pid postdates the lock file (pid recycled - the real creator must
+# have started before the file existed), or - for a lock with unreadable
+# content (corrupt file, legacy dir lock) - when it is older than
+# LOCK_TIMEOUT. A live writer keeps its lock no matter how long it runs;
+# waiters give up after LOCK_WAIT seconds and report the holder.
 #
 # `stat -c` is GNU, `-f` is BSD - `-f` also EXISTS on GNU (filesystem
 # status), so try GNU first and numeric-validate; anything ambiguous
@@ -73,15 +76,9 @@ mtime_of() {
   printf '%s\n' "$m"
 }
 
-# Epoch seconds when pid $1's process started: /proc/<pid> dir mtime on
-# Linux (procfs is always mounted - no procps needed); elsewhere the
-# elapsed time from `ps etime` ([[dd-]hh:]mm:ss - etimes is unavailable on
-# BSD ps) subtracted from now.
+# Epoch seconds when pid $1's process started, for systems without /proc:
+# elapsed time from `ps etime` ([[dd-]hh:]mm:ss) subtracted from now.
 proc_start() {
-  if [ -d "/proc/$1" ]; then
-    mtime_of "/proc/$1"
-    return
-  fi
   elapsed=$(ps -o etime= -p "$1" 2>/dev/null | awk '{
     sub(/\.[0-9]+$/, ""); d = 0; hms = $0
     if (index(hms, "-")) { split(hms, a, "-"); d = a[1]; hms = a[2] }
@@ -92,15 +89,27 @@ proc_start() {
   printf '%s\n' $(( $(date +%s) - elapsed ))
 }
 
-lock_dir_stale() {
-  owner=$(cat "$1/pid" 2>/dev/null)
+# Owner pid $1 is alive but may be recycled: the process that created the
+# lock must have started before the lock file existed. On Linux this is a
+# nanosecond -nt test against /proc/<pid>; elsewhere compare ps-derived
+# start to the file mtime with a 1s margin for whole-second flooring.
+lock_owner_recycled() {
+  if [ -d "/proc/$1" ]; then
+    [ "/proc/$1" -nt "$2" ]
+    return
+  fi
+  pstart=$(proc_start "$1")
+  mtime=$(mtime_of "$2")
+  case $pstart in ''|*[!0-9]*) return 1 ;; esac
+  case $mtime in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pstart" -gt $((mtime + 1)) ]
+}
+
+lock_file_stale() {
+  owner=$(cat "$1" 2>/dev/null)
   if [ -n "$owner" ]; then
     kill -0 "$owner" 2>/dev/null || return 0
-    pstart=$(proc_start "$owner")
-    mtime=$(mtime_of "$1")
-    case $pstart in ''|*[!0-9]*) return 1 ;; esac
-    case $mtime in ''|*[!0-9]*) return 1 ;; esac
-    [ "$pstart" -gt "$mtime" ]
+    lock_owner_recycled "$owner" "$1"
     return
   fi
   mtime=$(mtime_of "$1") || return 1
@@ -109,11 +118,11 @@ lock_dir_stale() {
 
 # Atomically claim whatever sits at $LOCK via rename - only one contender
 # can move a given incarnation - then re-verify staleness on the claimed
-# dir. If we accidentally grabbed someone's fresh live lock, put it back
+# file. If we accidentally grabbed someone's fresh live lock, put it back
 # instead of deleting it.
 try_claim_stale() {
   mv "$LOCK" "$LOCK.claim.$$" 2>/dev/null || return 1
-  if lock_dir_stale "$LOCK.claim.$$"; then
+  if lock_file_stale "$LOCK.claim.$$"; then
     rm -rf "$LOCK.claim.$$"
     return 0
   fi
@@ -122,29 +131,26 @@ try_claim_stale() {
 }
 
 unlock() {
-  owner=$(cat "$LOCK/pid" 2>/dev/null)
-  [ "$owner" = "$$" ] || return 0
-  rm -f "$LOCK/pid" 2>/dev/null
-  rmdir "$LOCK" 2>/dev/null
+  owner=$(cat "$LOCK" 2>/dev/null)
+  [ "$owner" = "$$" ] && rm -f "$LOCK"
 }
 
 lock() {
+  trap unlock EXIT
+  trap 'exit 1' INT TERM HUP
   waited=0
-  until mkdir "$LOCK" 2>/dev/null; do
-    if lock_dir_stale "$LOCK" && try_claim_stale; then
+  until ( set -C; printf '%s\n' "$$" > "$LOCK" ) 2>/dev/null; do
+    if lock_file_stale "$LOCK" && try_claim_stale; then
       continue
     fi
     waited=$((waited + 1))
-    [ "$waited" -lt "$LOCK_WAIT" ] || die "peers lock held by live pid $(cat "$LOCK/pid" 2>/dev/null || echo unknown) for over ${LOCK_WAIT}s"
+    [ "$waited" -lt "$LOCK_WAIT" ] || die "peers lock held by live pid $(cat "$LOCK" 2>/dev/null || echo unknown) for over ${LOCK_WAIT}s"
     sleep 1
   done
-  printf '%s\n' "$$" > "$LOCK/pid"
-  # Sweep orphaned claim dirs from earlier contested breaks.
+  # Sweep orphaned claim artifacts from earlier contested breaks.
   for stray in "$LOCK".claim.*; do
-    [ -d "$stray" ] && lock_dir_stale "$stray" && rm -rf "$stray"
+    [ -e "$stray" ] && lock_file_stale "$stray" && rm -rf "$stray"
   done
-  trap unlock EXIT
-  trap 'exit 1' INT TERM HUP
 }
 
 # Live surface refs across every workspace and window - agents on the bus do

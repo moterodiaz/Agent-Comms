@@ -110,7 +110,7 @@ def test_register_without_jq_uses_sed_fallback(bus, tmp_path):
     nojq.mkdir()
     for tool in ("sh", "awk", "sed", "grep", "tr", "head", "cat", "mkdir", "rmdir",
                  "mv", "sort", "sleep", "basename", "dirname", "printf",
-                 "rm", "date", "stat", "ps"):
+                 "rm", "date", "stat", "ps", "ln"):
         src = shutil.which(tool)
         if src:
             os.symlink(src, nojq / tool)
@@ -247,25 +247,25 @@ def test_concurrent_registrations_do_not_lose_entries(bus):
 def test_lock_from_dead_process_is_reclaimed(bus):
     dead = subprocess.Popen(["true"])
     dead.wait()
-    lockdir = bus.peers.parent / "peers.lock"
-    lockdir.mkdir(parents=True)
-    (lockdir / "pid").write_text(str(dead.pid))
+    lockfile = bus.peers.parent / "peers.lock"
+    lockfile.parent.mkdir(parents=True)
+    lockfile.write_text(str(dead.pid))
     bus("devin", caller="surface:1", check=True)
     assert entries(bus.peers) == {"devin": "surface:1"}
-    assert not lockdir.exists()
+    assert not lockfile.exists()
 
 
 def test_lock_from_live_process_is_not_stolen(bus):
     sleeper = subprocess.Popen(["sleep", "60"])
-    lockdir = bus.peers.parent / "peers.lock"
-    lockdir.mkdir(parents=True)
-    (lockdir / "pid").write_text(str(sleeper.pid))
+    lockfile = bus.peers.parent / "peers.lock"
+    lockfile.parent.mkdir(parents=True)
+    lockfile.write_text(str(sleeper.pid))
     try:
         proc = bus("devin", caller="surface:1",
                    env={"BUS_LOCK_WAIT_TIMEOUT": "2"})
         assert proc.returncode == 1
         assert "held by live pid" in proc.stderr
-        assert lockdir.exists()
+        assert lockfile.exists()
     finally:
         sleeper.kill()
         sleeper.wait()
@@ -273,20 +273,20 @@ def test_lock_from_live_process_is_not_stolen(bus):
 
 def test_lock_with_recycled_pid_is_reclaimed(bus):
     # The pid in the lock is alive but belongs to a process that started
-    # AFTER the lock dir was created - i.e. the crashed writer's pid was
+    # AFTER the lock file was created - i.e. the crashed writer's pid was
     # recycled. Registration must still reclaim the lock.
     sleeper = subprocess.Popen(["sleep", "60"])
-    lockdir = bus.peers.parent / "peers.lock"
+    lockfile = bus.peers.parent / "peers.lock"
     try:
-        lockdir.mkdir(parents=True)
-        (lockdir / "pid").write_text(str(sleeper.pid))
-        # Writing pid bumped the dir mtime; age it so the lock predates
-        # the process regardless of wall-clock granularity.
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text(str(sleeper.pid))
+        # Age the lock file so it predates the process regardless of
+        # wall-clock granularity.
         old = time.time() - 100
-        os.utime(lockdir, (old, old))
+        os.utime(lockfile, (old, old))
         bus("devin", caller="surface:1", check=True)
         assert entries(bus.peers) == {"devin": "surface:1"}
-        assert not lockdir.exists()
+        assert not lockfile.exists()
     finally:
         sleeper.kill()
         sleeper.wait()
