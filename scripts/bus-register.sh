@@ -56,23 +56,61 @@ esac
 command -v cmux >/dev/null 2>&1 || die "cmux CLI not found in PATH"
 
 # mkdir is atomic on every POSIX filesystem, so it doubles as a portable
-# mutex. A lock is stale only when its owner pid is dead or - for a lock
-# whose pid file was never written (crash between mkdir and write) - when
-# the directory is older than LOCK_TIMEOUT. A live writer keeps its lock no
-# matter how long it runs; waiters give up after LOCK_WAIT seconds and
-# report the holder.
-lock_stale() {
-  owner=$(cat "$LOCK/pid" 2>/dev/null)
+# mutex. A lock is stale only when its owner pid is dead, when a live pid
+# postdates the lock dir (pid recycled - the real creator must have started
+# before the dir existed), or - for a lock whose pid file was never written
+# (crash between mkdir and write) - when the dir is older than LOCK_TIMEOUT.
+# A live writer keeps its lock no matter how long it runs; waiters give up
+# after LOCK_WAIT seconds and report the holder.
+#
+# `stat -c` is GNU, `-f` is BSD - `-f` also EXISTS on GNU (filesystem
+# status), so try GNU first and numeric-validate; anything ambiguous
+# answers "not stale": a missed break costs a wait, a false break costs
+# corruption.
+mtime_of() {
+  m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
+  case $m in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$m"
+}
+
+# Seconds since a pid's process started, parsed from `ps etime`
+# ([[dd-]hh:]mm:ss - etimes is unavailable on BSD ps).
+proc_age() {
+  ps -o etime= -p "$1" 2>/dev/null | awk '{
+    sub(/\.[0-9]+$/, ""); d = 0; hms = $0
+    if (index(hms, "-")) { split(hms, a, "-"); d = a[1]; hms = a[2] }
+    n = split(hms, t, ":"); s = 0
+    for (i = 1; i <= n; i++) s = s * 60 + t[i]
+    print d * 86400 + s }'
+}
+
+lock_dir_stale() {
+  owner=$(cat "$1/pid" 2>/dev/null)
   if [ -n "$owner" ]; then
-    ! kill -0 "$owner" 2>/dev/null
+    kill -0 "$owner" 2>/dev/null || return 0
+    elapsed=$(proc_age "$owner")
+    mtime=$(mtime_of "$1")
+    case $elapsed in ''|*[!0-9]*) return 1 ;; esac
+    case $mtime in ''|*[!0-9]*) return 1 ;; esac
+    [ $(( $(date +%s) - elapsed )) -gt "$mtime" ]
     return
   fi
-  # `stat -c` is GNU, `-f` is BSD - `-f` also EXISTS on GNU (filesystem
-  # status), so try GNU first and numeric-validate; a BSD-only `-c` failure
-  # falls through to `-f`.
-  mtime=$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)
-  case $mtime in ''|*[!0-9]*) return 1 ;; esac
+  mtime=$(mtime_of "$1") || return 1
   [ $(( $(date +%s) - mtime )) -ge "$LOCK_TIMEOUT" ]
+}
+
+# Atomically claim whatever sits at $LOCK via rename - only one contender
+# can move a given incarnation - then re-verify staleness on the claimed
+# dir. If we accidentally grabbed someone's fresh live lock, put it back
+# instead of deleting it.
+try_claim_stale() {
+  mv "$LOCK" "$LOCK.claim.$$" 2>/dev/null || return 1
+  if lock_dir_stale "$LOCK.claim.$$"; then
+    rm -rf "$LOCK.claim.$$"
+    return 0
+  fi
+  mv -n "$LOCK.claim.$$" "$LOCK" 2>/dev/null
+  return 1
 }
 
 unlock() {
@@ -85,9 +123,7 @@ unlock() {
 lock() {
   waited=0
   until mkdir "$LOCK" 2>/dev/null; do
-    if lock_stale; then
-      rm -f "$LOCK/pid" 2>/dev/null
-      rmdir "$LOCK" 2>/dev/null
+    if lock_dir_stale "$LOCK" && try_claim_stale; then
       continue
     fi
     waited=$((waited + 1))
@@ -95,6 +131,10 @@ lock() {
     sleep 1
   done
   printf '%s\n' "$$" > "$LOCK/pid"
+  # Sweep orphaned claim dirs from earlier contested breaks.
+  for stray in "$LOCK".claim.*; do
+    [ -d "$stray" ] && lock_dir_stale "$stray" && rm -rf "$stray"
+  done
   trap unlock EXIT
   trap 'exit 1' INT TERM HUP
 }

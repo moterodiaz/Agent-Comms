@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -109,7 +110,7 @@ def test_register_without_jq_uses_sed_fallback(bus, tmp_path):
     nojq.mkdir()
     for tool in ("sh", "awk", "sed", "grep", "tr", "head", "cat", "mkdir", "rmdir",
                  "mv", "sort", "sleep", "basename", "dirname", "printf",
-                 "rm", "date", "stat"):
+                 "rm", "date", "stat", "ps"):
         src = shutil.which(tool)
         if src:
             os.symlink(src, nojq / tool)
@@ -265,6 +266,27 @@ def test_lock_from_live_process_is_not_stolen(bus):
         assert proc.returncode == 1
         assert "held by live pid" in proc.stderr
         assert lockdir.exists()
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_lock_with_recycled_pid_is_reclaimed(bus):
+    # The pid in the lock is alive but belongs to a process that started
+    # AFTER the lock dir was created - i.e. the crashed writer's pid was
+    # recycled. Registration must still reclaim the lock.
+    sleeper = subprocess.Popen(["sleep", "60"])
+    lockdir = bus.peers.parent / "peers.lock"
+    try:
+        lockdir.mkdir(parents=True)
+        (lockdir / "pid").write_text(str(sleeper.pid))
+        # Writing pid bumped the dir mtime; age it so the lock predates
+        # the process regardless of wall-clock granularity.
+        old = time.time() - 100
+        os.utime(lockdir, (old, old))
+        bus("devin", caller="surface:1", check=True)
+        assert entries(bus.peers) == {"devin": "surface:1"}
+        assert not lockdir.exists()
     finally:
         sleeper.kill()
         sleeper.wait()
