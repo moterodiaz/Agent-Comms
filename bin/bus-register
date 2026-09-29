@@ -1,9 +1,9 @@
 #!/bin/sh
-# bus-register.sh - announce this surface on the inter-agent bus.
+# bus-register - announce this surface on the inter-agent bus.
 #
-# Usage: bus-register.sh <name> [--force]
-#        bus-register.sh --list
-#        bus-register.sh --prune
+# Usage: bus-register <name> [--force]
+#        bus-register --list
+#        bus-register --prune
 #
 # Resolves the caller's live surface via `cmux identify --json` (no pane
 # naming or manual ref lookup needed) and upserts `name -> surface:N` into
@@ -22,7 +22,7 @@ set -u
 
 die() { echo "bus-register: $*" >&2; exit 1; }
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=${AGENT_BUS_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
 BUS_DIR="$ROOT/.agent_bus"
 PEERS="$BUS_DIR/peers"
 LOCK="$PEERS.lock"
@@ -193,7 +193,7 @@ caller_ref() {
 prune_peers() {
   live_now=$(live_refs) || live_now=
   [ -n "$live_now" ] || { echo "bus-register: live tree unreachable - skipping prune" >&2; return 0; }
-  [ -f "$PEERS" ] || printf '# name -> live cmux surface ref (auto-maintained by bus-register.sh)\n' > "$PEERS"
+  [ -f "$PEERS" ] || printf '# name -> live cmux surface ref (auto-maintained by bus-register)\n' > "$PEERS"
   printf '%s\n' "$live_now" | awk '
     NR == FNR { live[$0] = 1; next }
     /^[[:space:]]*(#|$)/ { print; next }

@@ -1,4 +1,4 @@
-"""bus-register.sh against a stubbed `cmux` CLI (no live app needed).
+"""bus-register against a stubbed `cmux` CLI (no live app needed).
 
 The stub reads its topology from environment variables so each test can
 declare which surfaces are live and which surface the caller is.
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "bus-register.sh"
+SCRIPT = REPO / "bin" / "bus-register"
 
 CMUX_STUB = r'''#!/bin/sh
 # Stub cmux: topology comes from CMUX_STUB_LIVE (space-separated surface:N)
@@ -58,8 +58,8 @@ exit 1
 def bus(tmp_path):
     """Copy the scripts into a scratch repo root with a stub cmux on PATH."""
     root = tmp_path / "repo"
-    (root / "scripts").mkdir(parents=True)
-    shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
+    (root / "bin").mkdir(parents=True)
+    shutil.copy(SCRIPT, root / "bin" / SCRIPT.name)
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     stub = stub_dir / "cmux"
@@ -74,9 +74,10 @@ def bus(tmp_path):
         full_env["CMUX_STUB_LIVE"] = live
         full_env["CMUX_STUB_CALLER"] = caller or ""
         full_env.pop("CMUX_SURFACE_ID", None)
+        full_env["AGENT_BUS_ROOT"] = str(root)
         full_env.update(env or {})
         proc = subprocess.run(
-            ["sh", str(root / "scripts" / SCRIPT.name), *args],
+            ["sh", str(root / "bin" / SCRIPT.name), *args],
             env=full_env, capture_output=True, text=True,
         )
         if check:
