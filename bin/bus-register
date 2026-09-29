@@ -22,7 +22,19 @@ set -u
 
 die() { echo "bus-register: $*" >&2; exit 1; }
 
-ROOT=${AGENT_BUS_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
+# Bus root precedence: AGENT_BUS_ROOT > git toplevel of the caller's cwd.
+# Failing hard outside a repo beats silently rooting the bus at pwd - two
+# agents in different directories would each see an empty peers file and
+# never find each other. Relative overrides are canonicalized to an
+# absolute path so handoff pointers resolve identically for every agent.
+if [ -n "${AGENT_BUS_ROOT:-}" ]; then
+  ROOT=$AGENT_BUS_ROOT
+else
+  ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || die "cannot resolve a shared bus root - run inside a git repo or set AGENT_BUS_ROOT=<dir>"
+fi
+mkdir -p "$ROOT" 2>/dev/null || die "cannot create bus root '$ROOT'"
+ROOT=$(CDPATH= cd -- "$ROOT" && pwd) || die "cannot resolve bus root '$ROOT'"
 BUS_DIR="$ROOT/.agent_bus"
 PEERS="$BUS_DIR/peers"
 LOCK="$PEERS.lock"

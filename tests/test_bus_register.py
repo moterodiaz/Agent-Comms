@@ -48,6 +48,10 @@ case " $* " in
       echo "caller: ${CMUX_STUB_CALLER:-none}"
     fi
     exit 0 ;;
+  *" send-key "*)
+    exit 0 ;;
+  *" send "*)
+    exit 0 ;;
 esac
 echo "stub: unsupported: $*" >&2
 exit 1
@@ -59,7 +63,8 @@ def bus(tmp_path):
     """Copy the scripts into a scratch repo root with a stub cmux on PATH."""
     root = tmp_path / "repo"
     (root / "bin").mkdir(parents=True)
-    shutil.copy(SCRIPT, root / "bin" / SCRIPT.name)
+    for name in ("bus-register", "agent-tell"):
+        shutil.copy(REPO / "bin" / name, root / "bin" / name)
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     stub = stub_dir / "cmux"
@@ -68,17 +73,20 @@ def bus(tmp_path):
     peers = root / ".agent_bus" / "peers"
 
     def run(*args, live="surface:1 surface:2", caller="surface:1", env=None,
-            check=False):
+            check=False, cwd=None, default_root=True, script="bus-register"):
         full_env = dict(os.environ)
         full_env["PATH"] = f"{stub_dir}{os.pathsep}{full_env['PATH']}"
         full_env["CMUX_STUB_LIVE"] = live
         full_env["CMUX_STUB_CALLER"] = caller or ""
         full_env.pop("CMUX_SURFACE_ID", None)
-        full_env["AGENT_BUS_ROOT"] = str(root)
+        if default_root:
+            full_env["AGENT_BUS_ROOT"] = str(root)
+        else:
+            full_env.pop("AGENT_BUS_ROOT", None)
         full_env.update(env or {})
         proc = subprocess.run(
-            ["sh", str(root / "bin" / SCRIPT.name), *args],
-            env=full_env, capture_output=True, text=True,
+            ["sh", str(root / "bin" / script), *args],
+            env=full_env, cwd=cwd, capture_output=True, text=True,
         )
         if check:
             assert proc.returncode == 0, proc.stderr
@@ -291,3 +299,48 @@ def test_lock_with_recycled_pid_is_reclaimed(bus):
     finally:
         sleeper.kill()
         sleeper.wait()
+
+
+GIT_MISSING = shutil.which("git") is None
+
+
+@pytest.mark.skipif(GIT_MISSING, reason="git not installed")
+def test_root_defaults_to_git_toplevel(bus, tmp_path):
+    repo = tmp_path / "gitproj"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    sub = repo / "sub" / "dir"
+    sub.mkdir(parents=True)
+    bus("devin", caller="surface:1", cwd=sub, default_root=False, check=True)
+    assert entries(repo / ".agent_bus" / "peers") == {"devin": "surface:1"}
+
+
+def test_root_fails_outside_git_without_override(bus, tmp_path):
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    proc = bus("devin", cwd=outside, default_root=False)
+    assert proc.returncode == 1
+    assert "AGENT_BUS_ROOT" in proc.stderr
+
+
+@pytest.mark.skipif(GIT_MISSING, reason="git not installed")
+def test_register_then_tell_across_subdirs(bus, tmp_path):
+    repo = tmp_path / "gitproj"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "a").mkdir()
+    (repo / "b").mkdir()
+    bus("devin", caller="surface:1", cwd=repo / "a", default_root=False,
+        check=True)
+    proc = bus("devin", "hello peer", script="agent-tell", cwd=repo / "b",
+               default_root=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "sent to devin" in proc.stdout
+
+
+def test_relative_bus_root_is_canonicalized(bus, tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    proc = bus("devin", caller="surface:1", cwd=workdir, default_root=False,
+               env={"AGENT_BUS_ROOT": "shared"}, check=True)
+    assert entries(workdir / "shared" / ".agent_bus" / "peers") == {
+        "devin": "surface:1"}
+    assert str(workdir / "shared") in proc.stdout
