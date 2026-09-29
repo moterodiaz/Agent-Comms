@@ -1,8 +1,8 @@
 #!/bin/sh
-# agent-tell.sh - inter-agent message bus over the cmux socket API.
+# agent-tell - inter-agent message bus over the cmux socket API.
 #
-# Usage: agent-tell.sh <target> <message>
-#        agent-tell.sh <target> @<file>     (send file as a handoff doc)
+# Usage: agent-tell <target> <message>
+#        agent-tell <target> @<file>     (send file as a handoff doc)
 #   <target>: peer name from .agent_bus/peers, a surface title, a surface
 #             ref (surface:N), or a surface UUID.
 #
@@ -28,7 +28,17 @@ fi
 TARGET=$1
 MSG=$2
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# Same root contract as bus-register: AGENT_BUS_ROOT > git toplevel, fail
+# rather than silently root the bus at pwd, canonicalize to absolute so
+# handoff pointers work for peers running from other directories.
+if [ -n "${AGENT_BUS_ROOT:-}" ]; then
+  ROOT=$AGENT_BUS_ROOT
+else
+  ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || die "cannot resolve a shared bus root - run inside a git repo or set AGENT_BUS_ROOT=<dir>"
+fi
+mkdir -p "$ROOT" 2>/dev/null || die "cannot create bus root '$ROOT'"
+ROOT=$(CDPATH= cd -- "$ROOT" && pwd) || die "cannot resolve bus root '$ROOT'"
 BUS_DIR="$ROOT/.agent_bus"
 PEERS="$BUS_DIR/peers"
 mkdir -p "$BUS_DIR"

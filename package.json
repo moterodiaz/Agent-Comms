@@ -1,0 +1,16 @@
+{
+  "name": "agent-coms",
+  "version": "0.1.0",
+  "description": "Inter-agent message bus over cmux: register surfaces, send messages, hand off files between Claude Code, Codex and Devin.",
+  "repository": "github:moterodiaz/agent-coms",
+  "license": "MIT",
+  "scripts": {
+    "test": "uv run --with pytest pytest tests/ -q"
+  },
+  "bin": {
+    "agent-tell": "bin/agent-tell",
+    "bus-register": "bin/bus-register"
+  },
+  "files": ["bin", "SKILL.md"],
+  "os": ["darwin", "linux"]
+}
