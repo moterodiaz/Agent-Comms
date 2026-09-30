@@ -1,5 +1,5 @@
 ---
-name: agent-coms
+name: agent-comms
 description: Use when multiple AI agents (Claude Code, Codex, Devin) run in parallel cmux surfaces and need to find each other, send messages, or hand off specs/files. Provides `bus-register` and `agent-tell`.
 ---
 
@@ -7,7 +7,7 @@ description: Use when multiple AI agents (Claude Code, Codex, Devin) run in para
 
 Agents in parallel cmux surfaces share a local message bus stored in `.agent_bus/`. The bus root resolves in order: `$AGENT_BUS_ROOT`, then the git toplevel of the caller's directory. Outside a git repo with no `AGENT_BUS_ROOT`, the commands fail rather than silently rooting the bus at an arbitrary cwd. In nested checkouts (submodules, vendored repos, `.references/` dirs) the bus roots at the *innermost* toplevel — set `AGENT_BUS_ROOT` to one shared path to keep every agent on the same bus. Add `.agent_bus/` to the project's `.gitignore`.
 
-Install: `npm i -g agent-coms` puts `bus-register` and `agent-tell` on PATH. `npx skills add moterodiaz/agent-coms` installs only this skill's files — it does not add the commands to PATH, so invoke them by their installed path (e.g. `<skill-dir>/bin/bus-register`) or install the npm package.
+Install: `npm i -g github:moterodiaz/Agent-Comms` puts `bus-register` and `agent-tell` on PATH. `npx skills add moterodiaz/Agent-Comms` installs only this skill's files — it does not add the commands to PATH, so invoke them by their installed path (e.g. `<skill-dir>/bin/bus-register`) or install the npm package.
 
 ## Join the bus
 At session start, announce yourself. Names are self-declared; the surface ref is auto-resolved via `cmux identify`.
